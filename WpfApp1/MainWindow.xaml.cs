@@ -14,6 +14,116 @@ using System.Windows.Shapes;
 
 namespace WpfApp1
 {
+
+
+    public class AppConfig
+    {
+        // 基础配置属性
+        public string LogPath { get; }
+        public double RangeScale { get; }
+        public bool ShouldCenterLaser { get; }
+        public Point LDSPosiMM { get; }
+        public double XOffset { get; }
+        public double AngleRotate { get; }
+
+        // 时间与激光参数
+        public int StartTimestamp { get; }
+        public int EndTimestamp { get; }
+        public double TimeScale { get; }
+        public double MinLaserDegree { get; }
+        public double MaxLaserDegree { get; }
+        public double MinExclusiveLaserDegree { get; }
+        public double MaxExclusiveLaserDegree { get; }
+        public bool EnableExclusive { get; }
+
+        // 高级功能配置
+        public bool FitSlamLaser { get; }
+        public int FollowWallAngleHoldDistance { get; }
+
+        // 构造函数
+        public AppConfig(
+            string logPath,
+            double rangeScale,
+            bool shouldCenterLaser,
+            Point ldsPosiMM,
+            double xOffset,
+            double angleRotate,
+            int startTimestamp,
+            int endTimestamp,
+            double timeScale,
+            double minLaserDegree,
+            double maxLaserDegree,
+            double minExclusiveLaserDegree,
+            double maxExclusiveLaserDegree,
+            bool enableExclusive,
+            bool fitSlamLaser,
+            int followWallAngleHoldDistance)
+        {
+            LogPath = logPath;
+            RangeScale = rangeScale;
+            ShouldCenterLaser = shouldCenterLaser;
+            LDSPosiMM = ldsPosiMM;
+            XOffset = xOffset;
+            AngleRotate = angleRotate;
+            StartTimestamp = startTimestamp;
+            EndTimestamp = endTimestamp;
+            TimeScale = timeScale;
+            MinLaserDegree = minLaserDegree;
+            MaxLaserDegree = maxLaserDegree;
+            MinExclusiveLaserDegree = minExclusiveLaserDegree;
+            MaxExclusiveLaserDegree = maxExclusiveLaserDegree;
+            EnableExclusive = enableExclusive;
+            FitSlamLaser = fitSlamLaser;
+            FollowWallAngleHoldDistance = followWallAngleHoldDistance;
+        }
+
+        public static AppConfig LoadFromXml(string configPath, string[] commandLineArgs = null)
+        {
+            var doc = XDocument.Load(configPath);
+
+            string logPath;
+            if (commandLineArgs.GetLength(0) > 1)
+            {
+                logPath = commandLineArgs[1];
+            }
+            else
+            {
+                logPath = GetXElementValue<string>(doc, "Log");
+            }
+
+            return new AppConfig(
+                logPath,
+                GetXElementValue<double>(doc, "RangeScale"),
+                GetXElementValue<bool>(doc, "CenterLaser"),
+                new Point(
+                    GetXElementValue<double>(doc, "LDSPosi_x_mm"),
+                    GetXElementValue<double>(doc, "LDSPosi_y_mm")
+                ),
+                GetXElementValue<double>(doc, "LDSPosi_x_mm"),
+                GetXElementValue<double>(doc, "AngleRotate", 0.0) * Math.PI / 180,
+                GetXElementValue<int>(doc, "StartTimestamp"),
+                GetXElementValue<int>(doc, "EndTimestamp"),
+                GetXElementValue<double>(doc, "TimeScale"),
+                GetXElementValue<double>(doc, "MinLaserDegree"),
+                GetXElementValue<double>(doc, "MaxLaserDegree"),
+                GetXElementValue<double>(doc, "MinExclusiveLaserDegree"),
+                GetXElementValue<double>(doc, "MaxExclusiveLaserDegree"),
+                GetXElementValue<bool>(doc, "EnableExclusive"),
+                GetXElementValue<bool>(doc, "FitSlamLaser"),
+                GetXElementValue<int>(doc, "FollowWallAngleHoldDistance")
+            );
+        }
+
+        // 泛型方法统一解析 XML 值
+        private static T GetXElementValue<T>(XDocument doc, string elementName, T defaultValue = default)
+        {
+            var element = doc.Descendants(elementName).FirstOrDefault();
+            return element != null
+                ? (T)Convert.ChangeType(element.Value, typeof(T))
+                : defaultValue;
+        }
+    }
+
     /// <summary>
     /// Interaction logic for MainWindow.xaml
     /// </summary>
