@@ -1,5 +1,7 @@
-﻿using System.Collections.ObjectModel;
+﻿using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Windows;
@@ -122,6 +124,89 @@ namespace WpfApp1
                 ? (T)Convert.ChangeType(element.Value, typeof(T))
                 : defaultValue;
         }
+    }
+
+
+    public class DebugLogEntry
+    {
+        public DateTime Timestamp { get; set; }
+        public string ThreadId { get; set; }
+        public string StackTrace { get; set; }
+    }
+
+    public class LogProcessor
+    {
+        private readonly ConcurrentBag<DebugLogEntry> _debugs = new();
+        AppConfig AppConfig { get; set; }
+
+
+        public List<DebugLogEntry> ProcessLogFile(string filePath, int maxThreads, AppConfig appConfig)
+        {
+            AppConfig = appConfig;
+            var chunks = SplitFileIntoChunks(filePath, maxThreads).ToList();
+
+            Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, chunk =>
+            {
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                using var reader = new StreamReader(fs);
+                fs.Seek(chunk.Start, SeekOrigin.Begin);
+
+                string line;
+                while (fs.Position < chunk.End && (line = reader.ReadLine()) != null)
+                {
+                    var entry = ParseLogLine(line);
+                    //if (entry is ErrorLogEntry error) _errors.Add(error);
+                    //else if (entry is InfoLogEntry info) _infos.Add(info);
+                     if (entry is DebugLogEntry debug) _debugs.Add(debug);
+                }
+            });
+
+            return _debugs.ToList();
+        }
+
+        public IEnumerable<(long Start, long End)> SplitFileIntoChunks(string filePath, int chunkCount)
+        {
+            var fileInfo = new FileInfo(filePath);
+            long chunkSize = fileInfo.Length / chunkCount;
+            long position = 0;
+
+            for (int i = 0; i < chunkCount; i++)
+            {
+                long end = (i == chunkCount - 1) ? fileInfo.Length : position + chunkSize;
+
+                // 确保块结束在换行符处，避免截断行
+                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                stream.Seek(end, SeekOrigin.Begin);
+                using var reader = new StreamReader(stream);
+                while (!reader.EndOfStream && reader.Read() != '\n') { }
+                end = stream.Position;
+
+                yield return (position, end);
+                position = end;
+            }
+        }
+
+        public object? ParseLogLine(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return null;
+
+            var parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) return null;
+
+            return line switch
+            {
+                _ when line.StartsWith("[DEBUG]") && parts.Length >= 3 => new DebugLogEntry
+                {
+                    // 修复索引越界问题
+                    Timestamp = DateTime.TryParse(parts[0], out var ts) ? ts : DateTime.MinValue,
+                    ThreadId = parts.Length >= 3 ? parts[1] : "UNKNOWN",
+                    //StackTrace = parts.Length > 3 ? string.Join('|', parts.Skip(3)) : "No stack trace"
+                },
+                _ => null
+            };
+
+        }
+
     }
 
     /// <summary>
