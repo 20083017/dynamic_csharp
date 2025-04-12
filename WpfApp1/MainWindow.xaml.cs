@@ -1,5 +1,7 @@
-﻿using System.Collections.ObjectModel;
+﻿using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Windows;
@@ -123,6 +125,322 @@ namespace WpfApp1
                 : defaultValue;
         }
     }
+
+
+    //public class DebugLogEntry
+    //{
+    //    public DateTime Timestamp { get; set; }
+    //    public string ThreadId { get; set; }
+    //    public string StackTrace { get; set; }
+    //}
+
+    //public class LogProcessor
+    //{
+    //    private readonly ConcurrentBag<DebugLogEntry> _debugs = new();
+    //    AppConfig AppConfig { get; set; }
+
+
+    //    public List<DebugLogEntry> ProcessLogFile(string filePath, int maxThreads, AppConfig appConfig)
+    //    {
+    //        AppConfig = appConfig;
+    //        var chunks = SplitFileIntoChunks(filePath, maxThreads).ToList();
+
+    //        Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, chunk =>
+    //        {
+    //            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+    //            using var reader = new StreamReader(fs);
+    //            fs.Seek(chunk.Start, SeekOrigin.Begin);
+
+    //            string line;
+    //            while (fs.Position < chunk.End && (line = reader.ReadLine()) != null)
+    //            {
+    //                var entry = ParseLogLine(line);
+    //                //if (entry is ErrorLogEntry error) _errors.Add(error);
+    //                //else if (entry is InfoLogEntry info) _infos.Add(info);
+    //                 if (entry is DebugLogEntry debug) _debugs.Add(debug);
+    //            }
+    //        });
+
+    //        return _debugs.ToList();
+    //    }
+
+    //    public IEnumerable<(long Start, long End)> SplitFileIntoChunks(string filePath, int chunkCount)
+    //    {
+    //        var fileInfo = new FileInfo(filePath);
+    //        long chunkSize = fileInfo.Length / chunkCount;
+    //        long position = 0;
+
+    //        for (int i = 0; i < chunkCount; i++)
+    //        {
+    //            long end = (i == chunkCount - 1) ? fileInfo.Length : position + chunkSize;
+
+    //            // 确保块结束在换行符处，避免截断行
+    //            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+    //            stream.Seek(end, SeekOrigin.Begin);
+    //            using var reader = new StreamReader(stream);
+    //            while (!reader.EndOfStream && reader.Read() != '\n') { }
+    //            end = stream.Position;
+
+    //            yield return (position, end);
+    //            position = end;
+    //        }
+    //    }
+
+    //    public object? ParseLogLine(string line)
+    //    {
+    //        if (string.IsNullOrEmpty(line)) return null;
+
+    //        var parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+    //        if (parts.Length < 2) return null;
+
+    //        return line switch
+    //        {
+    //            _ when line.StartsWith("[DEBUG]") && parts.Length >= 3 => new DebugLogEntry
+    //            {
+    //                // 修复索引越界问题
+    //                Timestamp = DateTime.TryParse(parts[0], out var ts) ? ts : DateTime.MinValue,
+    //                ThreadId = parts.Length >= 3 ? parts[1] : "UNKNOWN",
+    //                //StackTrace = parts.Length > 3 ? string.Join('|', parts.Skip(3)) : "No stack trace"
+    //            },
+    //            _ => null
+    //        };
+
+    //    }
+
+    //}
+    public class LogProcessor
+    {
+        private Rect realGridMapRange = new Rect();
+        private SLAMPose lastSLAMPose = new SLAMPose();
+        private AppConfig AppConfig { get; set; }
+        private HashSet<string> _checkboxNames = new HashSet<string>();
+        private List<ConcurrentBag<KeyValuePair<uint, List<LaserPoint>>>> AllLaserList;
+        private List<List<KeyValuePair<uint, List<LaserPoint>>>> AllResultLaserList;
+
+        const int stIndSlamPoseMarkerForRRLoader = 2;
+        const string slamPoseMarkerForRRLoador = @"slamPose";
+
+        private const UInt16 LDS_FLAG_INVALID = 0x8000;
+        private const UInt16 LDS_FLAG_FILTER = 0x2000;
+        private const UInt16 LDS_ALL_TAG = 0x0FFF;
+
+        public void ProcessLogFile(string filePath, int maxThreads, AppConfig appConfig)
+        {
+            AppConfig = appConfig;
+            var chunks = SplitFileIntoChunks(filePath, maxThreads).ToList();
+
+            // 初始化 AllLaserList
+            ParseAllLinesNames(appConfig.StartTimestamp, appConfig.EndTimestamp);
+            AllLaserList = _checkboxNames
+                .Select(_ => new ConcurrentBag<KeyValuePair<uint, List<LaserPoint>>>())
+                .ToList();
+            AllResultLaserList = _checkboxNames
+                .Select(_ => new List<KeyValuePair<uint, List<LaserPoint>>>())
+                .ToList();
+
+            // 并行处理日志文件
+            Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = maxThreads }, chunk =>
+            {
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                using var reader = new StreamReader(fs);
+                fs.Seek(chunk.Start, SeekOrigin.Begin);
+
+                string line;
+                while (fs.Position < chunk.End && (line = reader.ReadLine()) != null)
+                {
+                    ParseLogLine(line);
+                }
+            });
+
+            // 对 AllLaserList 中的每个 ConcurrentBag 进行排序
+            SortAllLaserList();
+        }
+
+        public IEnumerable<(long Start, long End)> SplitFileIntoChunks(string filePath, int chunkCount)
+        {
+            var fileInfo = new FileInfo(filePath);
+            long chunkSize = fileInfo.Length / chunkCount;
+            long position = 0;
+
+            for (int i = 0; i < chunkCount; i++)
+            {
+                long end = (i == chunkCount - 1) ? fileInfo.Length : position + chunkSize;
+
+                // 确保块结束在换行符处，避免截断行
+                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                stream.Seek(end, SeekOrigin.Begin);
+                using var reader = new StreamReader(stream);
+                while (!reader.EndOfStream && reader.Read() != '\n') { }
+                end = stream.Position;
+
+                yield return (position, end);
+                position = end;
+            }
+        }
+
+        private uint ParseTimestamp(string line)
+        {
+            try
+            {
+                var str = line.Substring(0, line.IndexOf(' '));
+                if (str.IndexOf('.') >= 0)
+                {
+                    return (uint)(double.Parse(str) * 1000);
+                }
+                else
+                {
+                    return uint.Parse(str);
+                }
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private bool TryParseLaserLineNames(string line)
+        {
+            var nums = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (nums.Length > 1 && nums[1].Contains("Laser") && !nums[1].Contains("Multi"))
+            {
+                _checkboxNames.Add(nums[1]);
+                return _checkboxNames.Count == 9 || _checkboxNames.Count == 3;
+            }
+            return false;
+        }
+
+        private void ParseAllLinesNames(int startTimestamp, int endTimestamp)
+        {
+            using var streamReader = new StreamReader(AppConfig.LogPath);
+            string line;
+            while ((line = streamReader.ReadLine()) != null)
+            {
+                uint timestamp = ParseTimestamp(line);
+                if (timestamp >= startTimestamp && TryParseLaserLineNames(line))
+                {
+                    if (timestamp > endTimestamp && endTimestamp >= 0)
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        private bool TryParseLaserLine(string line, out Dictionary<string, List<LaserPoint>> dicts)
+        {
+            dicts = new Dictionary<string, List<LaserPoint>>();
+            var nums = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+            if (nums.Length < 2) return false;
+
+            string laserName = nums[1];
+            if (_checkboxNames.Contains(laserName))
+            {
+                for (int i = 5; i + 2 < nums.Length; i += 3)
+                {
+                    int rawIntensity = int.Parse(nums[i + 2]);
+                    if ((rawIntensity & LDS_FLAG_INVALID) == 0 && (rawIntensity & LDS_FLAG_FILTER) == 0)
+                    {
+                        var laserPoint = new LaserPoint
+                        {
+                            Bearing = double.Parse(nums[i]) + AppConfig.AngleRotate,
+                            Range = double.Parse(nums[i + 1]) * 1000,
+                            Intensity = rawIntensity & LDS_ALL_TAG,
+                            ScanSLAMPose = lastSLAMPose
+                        };
+
+                        if (!dicts.ContainsKey(laserName))
+                        {
+                            dicts[laserName] = new List<LaserPoint>();
+                        }
+                        dicts[laserName].Add(laserPoint);
+                    }
+                }
+
+                return true;
+            }
+
+            int index = line.IndexOf(" ");
+
+            if ((string.Compare(line, index + 1, slamPoseMarkerForRRLoador, 0, slamPoseMarkerForRRLoador.Length) == 0))
+            {
+                //var nums = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                double x = double.Parse(nums[stIndSlamPoseMarkerForRRLoader]) * 1000;
+                double y = double.Parse(nums[stIndSlamPoseMarkerForRRLoader + 1]) * 1000;
+                double bearing = double.Parse(nums[stIndSlamPoseMarkerForRRLoader + 2]);
+
+                this.lastSLAMPose = new SLAMPose(x, y, bearing);
+                if (lastSLAMPose.X < realGridMapRange.StartPoint.X)
+                {
+                    realGridMapRange.StartPoint = new Point(lastSLAMPose.X, realGridMapRange.StartPoint.Y);
+                }
+
+                if (lastSLAMPose.Y < realGridMapRange.StartPoint.Y)
+                {
+                    realGridMapRange.StartPoint = new Point(realGridMapRange.StartPoint.X, lastSLAMPose.Y);
+                }
+
+                if (lastSLAMPose.X > realGridMapRange.EndPoint.X)
+                {
+                    realGridMapRange.EndPoint = new Point(lastSLAMPose.X, realGridMapRange.EndPoint.Y);
+                }
+
+                if (lastSLAMPose.Y > realGridMapRange.EndPoint.Y)
+                {
+                    realGridMapRange.EndPoint = new Point(realGridMapRange.EndPoint.X, lastSLAMPose.Y);
+                }
+            }
+
+
+            return false;
+        }
+
+        public void ParseLogLine(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+
+            uint timestamp = ParseTimestamp(line);
+            if (timestamp < AppConfig.StartTimestamp || (timestamp > AppConfig.EndTimestamp && AppConfig.EndTimestamp >= 0))
+            {
+                return;
+            }
+
+            if (TryParseLaserLine(line, out var dicts))
+            {
+                foreach (var laserName in _checkboxNames)
+                {
+                    if (dicts.TryGetValue(laserName, out var laserPoints) && laserPoints.Count > 0)
+                    {
+                        int index = _checkboxNames.ToList().IndexOf(laserName);
+                        AllLaserList[index].Add(new KeyValuePair<uint, List<LaserPoint>>(timestamp, laserPoints));
+                    }
+                }
+            }
+        }
+
+        private void SortAllLaserList()
+        {
+            for (int i = 0; i < AllLaserList.Count; i++)
+            {
+                // 将 ConcurrentBag 转换为 List 并排序
+                var sortedList = AllLaserList[i].OrderBy(pair => pair.Key).ToList();
+
+                // 替换原来的 ConcurrentBag
+                AllResultLaserList[i] = new List<KeyValuePair<uint, List<LaserPoint>>>(sortedList);
+            }
+        }
+
+        public List<List<KeyValuePair<uint, List<LaserPoint>>>> GetLaserData()
+        {
+            return AllResultLaserList;
+        }
+        public HashSet<string> getCheckNames()
+        {
+            return _checkboxNames;
+        }
+    }
+
+
 
     /// <summary>
     /// Interaction logic for MainWindow.xaml
