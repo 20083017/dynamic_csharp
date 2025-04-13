@@ -126,7 +126,6 @@ namespace WpfApp1
         }
     }
 
-
     //public class DebugLogEntry
     //{
     //    public DateTime Timestamp { get; set; }
@@ -208,6 +207,7 @@ namespace WpfApp1
     //    }
 
     //}
+
     public class LogProcessor
     {
         private Rect realGridMapRange = new Rect();
